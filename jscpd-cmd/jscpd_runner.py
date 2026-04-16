@@ -58,22 +58,40 @@ def run_jscpd(config_path='config.json'):
             with open(report_path, 'r') as rf:
                 report_data = json.load(rf)
                 
-                # Basic summary output
-                statistics = report_data.get('statistics', {})
-                total = statistics.get('total', {})
-                
-                print("\n--- Detection Summary ---")
-                print(f"Duplicates found: {total.get('percentage')}%")
-                print(f"Total lines: {total.get('lines')}")
-                print(f"Duplicated lines: {total.get('duplicatedLines')}")
-                print(f"Total tokens: {total.get('tokens')}")
-                print(f"Duplicated tokens: {total.get('duplicatedTokens')}")
-                
-                duplicates = report_data.get('duplicates', [])
-                if duplicates:
-                    print(f"\nFound {len(duplicates)} duplicate blocks.")
-                else:
-                    print("\nNo duplicates found.")
+            duplicates = report_data.get('duplicates', [])
+            
+            # Filter duplicates to only include those between different files
+            filtered_duplicates = []
+            for dup in duplicates:
+                file1_name = os.path.normpath(dup['firstFile']['name'])
+                file2_name = os.path.normpath(dup['secondFile']['name'])
+                if file1_name != file2_name:
+                    filtered_duplicates.append(dup)
+
+            # Update report data with filtered duplicates
+            report_data['duplicates'] = filtered_duplicates
+            
+            # Recalculate basic statistics for filtered duplicates
+            filtered_duplicated_lines = sum(d['lines'] for d in filtered_duplicates)
+            
+            filtered_report_path = os.path.join(output_dir, 'filtered-report.json')
+            with open(filtered_report_path, 'w') as wf:
+                json.dump(report_data, wf, indent=2)
+
+            # Basic summary output
+            statistics = report_data.get('statistics', {})
+            total = statistics.get('total', {})
+            
+            print("\n--- Detection Summary (Filtered: Cross-file only) ---")
+            print(f"Total lines in both files: {total.get('lines')}")
+            print(f"Cross-file duplicated lines: {filtered_duplicated_lines}")
+            print(f"Original duplicated lines (including self): {total.get('duplicatedLines')}")
+            
+            if filtered_duplicates:
+                print(f"\nFound {len(filtered_duplicates)} cross-file duplicate blocks.")
+                print(f"Filtered report saved to: {filtered_report_path}")
+            else:
+                print("\nNo cross-file duplicates found.")
         else:
             print(f"Report not found at {report_path}. stdout might contain info.")
             print(result.stdout)

@@ -104,17 +104,20 @@ def run_jscpd(config_path='config.json'):
     with open(config_path, 'r') as f:
         config = json.load(f)
 
-    file1 = config.get('file1')
-    file2 = config.get('file2')
+    base_dirs = config.get('base_dirs', [])
+    asset_path = config.get('asset_path', '')
     output_dir = config.get('output_dir', '.jscpd-temp')
     min_lines = config.get('min_lines', 1)
     max_lines = config.get('max_lines', 99999)
     min_tokens = config.get('min_tokens', 30)
     max_size = config.get('max_size', '50mb')
 
-    if not file1 or not file2:
-        print("Error: file1 or file2 not specified in config.")
+    if not base_dirs or not asset_path:
+        print("Error: base_dirs or asset_path not specified in config.")
         return
+
+    file1 = os.path.join(base_dirs[0], asset_path)
+    file2 = os.path.join(base_dirs[1], asset_path)
 
     # Ensure output directory exists
     if not os.path.exists(output_dir):

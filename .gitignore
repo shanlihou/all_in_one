@@ -3,3 +3,4 @@
 *.pyc
 *.navmesh
 *.csv
+.jscpd-temp

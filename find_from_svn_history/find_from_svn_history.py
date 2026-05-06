@@ -25,13 +25,28 @@ def run_svn_command(cmd, cwd=None):
     print(f"[DEBUG] 执行命令: {cmd}")
     print(f"[DEBUG] 工作目录: {cwd}")
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+        result = subprocess.run(cmd, shell=True, capture_output=True, cwd=cwd)
         print(f"[DEBUG] 返回码: {result.returncode}")
-        print(f"[DEBUG] stdout长度: {len(result.stdout)}")
-        print(f"[DEBUG] stderr长度: {len(result.stderr)}")
-        if result.stderr:
-            print(f"[DEBUG] stderr内容: {result.stderr[:200]}")
-        return result.stdout + result.stderr
+
+        def decode_bytes(b):
+            if not b:
+                return ""
+            try:
+                return b.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    return b.decode('gbk')
+                except:
+                    return b.decode('utf-8', errors='ignore')
+
+        stdout = decode_bytes(result.stdout)
+        stderr = decode_bytes(result.stderr)
+
+        print(f"[DEBUG] stdout长度: {len(stdout)}")
+        print(f"[DEBUG] stderr长度: {len(stderr)}")
+        if stderr:
+            print(f"[DEBUG] stderr内容: {stderr[:200]}")
+        return stdout + stderr
     except Exception as e:
         print(f"[DEBUG] 异常: {e}")
         return str(e)
@@ -126,6 +141,8 @@ def find_keyword_in_history(keyword, max_versions=50, cwd=None):
 
     print(f"找到{len(logs)}个版本，开始搜索关键字: {keyword}")
 
+    found_versions = []
+
     for i in range(len(logs) - 1):
         rev_current = logs[i]['revision']
         rev_prev = logs[i + 1]['revision']
@@ -146,6 +163,25 @@ def find_keyword_in_history(keyword, max_versions=50, cwd=None):
             if len(matches) > 10:
                 print(f"  ... 还有{len(matches)-10}行匹配")
             print()
+
+            found_versions.append({
+                'revision': rev_current,
+                'author': logs[i]['author'],
+                'date': logs[i]['date'],
+                'match_count': len(matches)
+            })
+
+    # 输出总结
+    print("\n" + "="*60)
+    print(f"搜索总结: 关键字 '{keyword}'")
+    print("="*60)
+    if found_versions:
+        print(f"共在 {len(found_versions)} 个版本中找到匹配:")
+        for v in found_versions:
+            print(f"  r{v['revision']} - {v['date']} - {v['author']} ({v['match_count']} 处匹配)")
+    else:
+        print("未找到任何匹配")
+    print("="*60)
 
 if __name__ == '__main__':
     config = load_config()

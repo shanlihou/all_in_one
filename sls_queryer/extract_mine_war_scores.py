@@ -138,7 +138,7 @@ def main():
         f.write('\n'.join(raw_lines))
 
     rows = [(host, player, total) for (host, player), (total, _) in max_scores.items()]
-    rows.sort(key=lambda r: (r[0], r[1]))
+    rows.sort(key=lambda r: (r[0], -r[2]))
 
     with open(args.out_file, 'w', encoding='utf-8') as f:
         f.write("server\tplayerGbId\tmaxTotalScore\n")

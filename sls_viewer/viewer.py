@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         self.total_count = 0
         self.current_page = 0
         self.page_size = 50
+        self._pending_page = None
         self.history = load_history()
         self.range_history = load_range_history()
 
@@ -415,6 +416,7 @@ class MainWindow(QMainWindow):
         query = self.query_combo.currentText().strip()
         self._record_history(query)
         self.current_page = 0
+        self._pending_page = None
         self._run_query()
 
     def _record_history(self, query):
@@ -478,12 +480,13 @@ class MainWindow(QMainWindow):
             return
         if self.current_page > 0:
             self.current_page -= 1
+            self._pending_page = None
             self._run_query()
 
     def on_next(self):
         if self.worker and self.worker.isRunning():
             return
-        self.current_page += 1
+        self._pending_page = self.current_page + 1
         self._run_query()
 
     def on_first(self):
@@ -491,6 +494,7 @@ class MainWindow(QMainWindow):
             return
         if self.current_page > 0:
             self.current_page = 0
+            self._pending_page = None
             self._run_query()
 
     def on_last(self):
@@ -499,6 +503,7 @@ class MainWindow(QMainWindow):
         last_page = max(0, (self.total_count - 1) // self.page_size)
         if self.total_count > 0 and self.current_page < last_page:
             self.current_page = last_page
+            self._pending_page = None
             self._run_query()
 
     def on_page_jump(self, page_num):
@@ -510,12 +515,13 @@ class MainWindow(QMainWindow):
         last_page = max(0, (self.total_count - 1) // self.page_size)
         if self.total_count > 0 and page_idx > last_page:
             page_idx = last_page
-        self.current_page = page_idx
+        self._pending_page = page_idx
         self._run_query()
 
     def on_page_size_change(self):
         self.page_size = int(self.page_size_combo.currentText())
         self.current_page = 0
+        self._pending_page = None
         if self.worker and self.worker.isRunning():
             return
         self._run_query()
@@ -629,7 +635,8 @@ class MainWindow(QMainWindow):
         query = self.query_combo.currentText().strip()
         from_time, to_time = self.get_time_range()
         self._record_range_history(from_time, to_time)
-        offset = self.current_page * self.page_size
+        offset_page = self._pending_page if self._pending_page is not None else self.current_page
+        offset = offset_page * self.page_size
 
         self.statusBar().showMessage('查询中... [{}]'.format(self.format_range_label()))
         self.search_btn.setEnabled(False)
@@ -653,6 +660,24 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def on_query_done(self, logs, total):
+        pending = self._pending_page
+        self._pending_page = None
+
+        if pending is not None and len(logs) == 0:
+            self.table.setRowCount(0)
+            self.detail.clear()
+            self._update_pagination_labels()
+            self.search_btn.setEnabled(True)
+            self.statusBar().showMessage(
+                '第 {} 页无数据，已保持在第 {} 页（共 {} 条）'.format(
+                    pending + 1, self.current_page + 1, self.total_count
+                ), 5000
+            )
+            return
+
+        if pending is not None:
+            self.current_page = pending
+
         self.total_count = total
         self.table.setRowCount(len(logs))
         for i, log in enumerate(logs):
@@ -699,6 +724,7 @@ class MainWindow(QMainWindow):
         )
 
     def on_query_error(self, msg):
+        self._pending_page = None
         self.search_btn.setEnabled(True)
         self.total_count = 0
         self._update_pagination_labels()

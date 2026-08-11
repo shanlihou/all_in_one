@@ -61,7 +61,7 @@ def run_query():
         from_time,
         to_time,
         '',
-        '_doRandomTeleporter and 22013',
+        '_doRandomTeleporter',
         100,
         0,
         False

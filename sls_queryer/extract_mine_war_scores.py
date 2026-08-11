@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 import re
@@ -83,12 +84,12 @@ def main():
     parser.add_argument('--to', dest='to_time', required=True,
                         help='结束时间，例如 "2026-07-30 13:40:00"')
     parser.add_argument('--lines', type=int, default=100, help='每页拉取条数，默认 100')
-    parser.add_argument('--out', dest='out_file', default='mine_war_max_scores.txt',
-                        help='playerGbId -> max totalScore 输出文件')
+    parser.add_argument('--out', dest='out_file', default='mine_war_max_scores.csv',
+                        help='playerGbId -> max totalScore 输出文件（csv）')
     parser.add_argument('--log-out', dest='log_file', default='mine_war_logs.txt',
                         help='原始日志输出文件')
     parser.add_argument('--min-score', type=int, default=300,
-                        help='过滤 totalScore 大于该值的记录，默认 300')
+                        help='过滤 totalScore 大于等于该值的记录，默认 300')
     args = parser.parse_args()
 
     config = load_config()
@@ -123,7 +124,7 @@ def main():
             if player is None:
                 continue
             matched += 1
-            if total <= args.min_score:
+            if total < args.min_score:
                 filtered += 1
                 continue
             host = extract_hostname(contents)
@@ -140,10 +141,11 @@ def main():
     rows = [(host, player, total) for (host, player), (total, _) in max_scores.items()]
     rows.sort(key=lambda r: (r[0], -r[2]))
 
-    with open(args.out_file, 'w', encoding='utf-8') as f:
-        f.write("server\tplayerGbId\tmaxTotalScore\n")
+    with open(args.out_file, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['server', 'playerGbId', 'maxTotalScore'])
         for host, player, total in rows:
-            f.write(f"{host}\t{player}\t{total}\n")
+            writer.writerow([host, player, total])
 
     grouped = {host: {player: total for h, player, total in rows if h == host}
                for host in {h for h, _, _ in rows}}
@@ -151,7 +153,7 @@ def main():
         json.dump(grouped, f, ensure_ascii=False, indent=2, sort_keys=True)
 
     print(f"共拉取日志: {total_logs} 条，命中 playerGbId/totalScore: {matched} 条")
-    print(f"被 totalScore>{args.min_score} 过滤掉: {filtered} 条")
+    print(f"被 totalScore<{args.min_score} 过滤掉: {filtered} 条")
     print(f"去重后 (server, playerGbId) 数量: {len(max_scores)}")
     print(f"原始日志已写入: {args.log_file}")
     print(f"统计结果已写入: {args.out_file} 和 {args.out_file}.json")

@@ -105,6 +105,14 @@ def push_range_history(history, from_ts, to_ts):
     return history[:RANGE_HISTORY_MAX]
 
 
+def parse_logstores(raw):
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    if isinstance(raw, list):
+        return [str(x) for x in raw if str(x).strip()]
+    return []
+
+
 class QueryWorker(QThread):
     finished = pyqtSignal(list, int)
     error = pyqtSignal(str)
@@ -159,8 +167,13 @@ class MainWindow(QMainWindow):
         self.history = load_history()
         self.range_history = load_range_history()
 
+        self.logstores = parse_logstores(config.get('logstore'))
+        if not self.logstores:
+            raise ValueError('配置中未找到 logstore，请检查 .config.json')
+        self.logstore = self.logstores[0]
+
         self.setWindowTitle('SLS 日志查看器  -  {}/{}'.format(
-            config.get('project', ''), config.get('logstore', '')
+            config.get('project', ''), self.logstore
         ))
         self.resize(1200, 720)
         self._build_ui()
@@ -176,6 +189,15 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
         bar.setSpacing(6)
 
+        bar.addWidget(QLabel('日志库:'))
+        self.logstore_combo = QComboBox()
+        self.logstore_combo.addItems(self.logstores)
+        if len(self.logstores) <= 1:
+            self.logstore_combo.setEnabled(False)
+        self.logstore_combo.currentTextChanged.connect(self.on_logstore_changed)
+        bar.addWidget(self.logstore_combo)
+
+        bar.addSpacing(4)
         bar.addWidget(QLabel('时间:'))
         self.time_combo = QComboBox()
         for label, _ in TIME_PRESETS:
@@ -408,6 +430,21 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             return
         self.current_page = 0
+        self._run_query()
+
+    def on_logstore_changed(self, name):
+        if not name or name == self.logstore:
+            return
+        self.logstore = name
+        self.current_page = 0
+        self._pending_page = None
+        self.total_count = 0
+        self._update_pagination_labels()
+        self.setWindowTitle('SLS 日志查看器  -  {}/{}'.format(
+            self.config.get('project', ''), self.logstore
+        ))
+        if self.worker and self.worker.isRunning():
+            return
         self._run_query()
 
     def on_search(self):
@@ -648,7 +685,7 @@ class MainWindow(QMainWindow):
         self.worker = QueryWorker(
             self.client,
             self.config['project'],
-            self.config['logstore'],
+            self.logstore,
             query,
             from_time,
             to_time,

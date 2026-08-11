@@ -8,8 +8,9 @@ from PyQt5.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem,
     QComboBox, QLabel, QHeaderView, QPlainTextEdit, QSplitter,
     QAbstractItemView, QMessageBox, QMenu, QAction,
-    QDateTimeEdit
+    QDateTimeEdit, QSpinBox
 )
+from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDateTime
 from PyQt5.QtGui import QKeySequence
 from aliyun.log import LogClient, GetLogsRequest
@@ -18,6 +19,10 @@ from aliyun.log import LogClient, GetLogsRequest
 HERE = os.path.dirname(os.path.abspath(__file__))
 HISTORY_PATH = os.path.join(HERE, '.search_history.json')
 HISTORY_MAX = 50
+RANGE_HISTORY_PATH = os.path.join(HERE, '.range_history.json')
+RANGE_HISTORY_MAX = 20
+LOG_PATH = os.path.join(HERE, 'sls_viewer.log')
+LOG_MAX_BYTES = 10 * 1024 * 1024
 
 TIME_PRESETS = [
     ("最近 5 分钟", 5),
@@ -27,14 +32,6 @@ TIME_PRESETS = [
     ("最近 24 小时", 1440),
 ]
 CUSTOM_RANGE_INDEX = len(TIME_PRESETS)
-
-DEFAULT_EVENTS = [
-    ("传送", "_doRandomTeleporter"),
-    ("玩家死亡", "onCellAppDeath"),
-    ("矿战", "mine_war"),
-    ("怪物", "monster"),
-    ("错误", "level:ERROR"),
-]
 
 
 def load_history():
@@ -65,23 +62,47 @@ def push_history(history, query):
     return history[:HISTORY_MAX]
 
 
-def parse_events(raw):
-    if not isinstance(raw, list):
+def load_range_history():
+    if not os.path.exists(RANGE_HISTORY_PATH):
         return []
-    parsed = []
-    for item in raw:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            label, query = item[0], item[1]
-            if query:
-                parsed.append((str(label), str(query)))
-        elif isinstance(item, dict):
-            query = item.get('query') or item.get('value') or ''
-            if not query:
-                continue
-            label = (item.get('label') or item.get('name')
-                     or item.get('title') or str(query))
-            parsed.append((str(label), str(query)))
-    return parsed
+    try:
+        with open(RANGE_HISTORY_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            result = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                f_ts = int(item.get('from', 0))
+                t_ts = int(item.get('to', 0))
+                if f_ts and t_ts and f_ts < t_ts:
+                    label = item.get('label') or '{:%Y-%m-%d %H:%M:%S} ~ {:%Y-%m-%d %H:%M:%S}'.format(
+                        datetime.fromtimestamp(f_ts), datetime.fromtimestamp(t_ts)
+                    )
+                    result.append({'from': f_ts, 'to': t_ts, 'label': label})
+            return result[:RANGE_HISTORY_MAX]
+    except Exception:
+        return []
+
+
+def save_range_history(history):
+    try:
+        with open(RANGE_HISTORY_PATH, 'w', encoding='utf-8') as f:
+            json.dump(history[:RANGE_HISTORY_MAX], f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print('保存时间区间历史失败: {}'.format(e))
+
+
+def push_range_history(history, from_ts, to_ts):
+    if not from_ts or not to_ts or from_ts >= to_ts:
+        return history
+    label = '{:%Y-%m-%d %H:%M:%S} ~ {:%Y-%m-%d %H:%M:%S}'.format(
+        datetime.fromtimestamp(from_ts), datetime.fromtimestamp(to_ts)
+    )
+    history = [h for h in history if not (h['from'] == from_ts and h['to'] == to_ts)]
+    history.insert(0, {'from': from_ts, 'to': to_ts, 'label': label})
+    return history[:RANGE_HISTORY_MAX]
 
 
 class QueryWorker(QThread):
@@ -135,7 +156,7 @@ class MainWindow(QMainWindow):
         self.current_page = 0
         self.page_size = 50
         self.history = load_history()
-        self.events = parse_events(config.get('events')) or DEFAULT_EVENTS
+        self.range_history = load_range_history()
 
         self.setWindowTitle('SLS 日志查看器  -  {}/{}'.format(
             config.get('project', ''), config.get('logstore', '')
@@ -164,6 +185,17 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.time_combo)
 
         bar.addSpacing(8)
+        bar.addWidget(QLabel('历史:'))
+        self.range_history_combo = QComboBox()
+        self.range_history_combo.setMinimumWidth(220)
+        self.range_history_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.range_history_combo.addItem('— 选择历史时间区间 —')
+        for item in self.range_history:
+            self.range_history_combo.addItem(item['label'], item)
+        self.range_history_combo.activated.connect(self.on_range_history_activated)
+        self.range_history_combo.setEnabled(bool(self.range_history))
+        bar.addWidget(self.range_history_combo)
+
         bar.addWidget(QLabel('查询:'))
         self.query_combo = QComboBox()
         self.query_combo.setEditable(True)
@@ -221,30 +253,26 @@ class MainWindow(QMainWindow):
         self.custom_range_row.setVisible(False)
         layout.addWidget(self.custom_range_row)
 
-        events_row = QHBoxLayout()
-        events_row.setSpacing(6)
-        events_row.addWidget(QLabel('快捷事件:'))
-        for label, query in self.events:
-            btn = QPushButton(label)
-            btn.setToolTip(query)
-            btn.clicked.connect(lambda checked=False, q=query: self.on_event_click(q))
-            events_row.addWidget(btn)
-        events_row.addStretch()
-        self.clear_history_btn = QPushButton('清空历史')
+        history_row = QHBoxLayout()
+        history_row.addStretch()
+        self.clear_history_btn = QPushButton('清空搜索/区间历史')
         self.clear_history_btn.clicked.connect(self.on_clear_history)
-        events_row.addWidget(self.clear_history_btn)
-        layout.addLayout(events_row)
+        history_row.addWidget(self.clear_history_btn)
+        layout.addLayout(history_row)
 
         splitter = QSplitter(Qt.Vertical)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(['时间', '内容'])
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(['时间', '主机', '内容'])
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
         )
         self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
+            1, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch
         )
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -265,7 +293,9 @@ class MainWindow(QMainWindow):
 
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
-        self.detail.setPlaceholderText('选中上面表格中的一行以查看完整内容')
+        self.detail.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.detail.setFont(QFont('Consolas', 10))
+        self.detail.setPlaceholderText('选中上面表格中的一行以查看完整 JSON（所有字段）')
         splitter.addWidget(self.detail)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -273,6 +303,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
 
         pager = QHBoxLayout()
+        self.first_btn = QPushButton('<< 首页')
+        self.first_btn.clicked.connect(self.on_first)
+        pager.addWidget(self.first_btn)
+
         self.prev_btn = QPushButton('< 上一页')
         self.prev_btn.clicked.connect(self.on_prev)
         pager.addWidget(self.prev_btn)
@@ -286,8 +320,24 @@ class MainWindow(QMainWindow):
         self.next_btn.clicked.connect(self.on_next)
         pager.addWidget(self.next_btn)
 
+        self.last_btn = QPushButton('末页 >>')
+        self.last_btn.clicked.connect(self.on_last)
+        pager.addWidget(self.last_btn)
+
         pager.addStretch()
 
+        pager.addWidget(QLabel('跳转:'))
+        self.page_spin = QSpinBox()
+        self.page_spin.setMinimum(1)
+        self.page_spin.setMaximum(1)
+        self.page_spin.setValue(1)
+        self.page_spin.setFixedWidth(60)
+        self.page_spin.valueChanged.connect(self.on_page_jump)
+        pager.addWidget(self.page_spin)
+        self.total_pages_label = QLabel('/ 1')
+        pager.addWidget(self.total_pages_label)
+
+        pager.addSpacing(8)
         pager.addWidget(QLabel('每页:'))
         self.page_size_combo = QComboBox()
         self.page_size_combo.addItems(['20', '50', '100', '200'])
@@ -377,15 +427,91 @@ class MainWindow(QMainWindow):
         self.query_combo.setCurrentIndex(0)
         save_history(self.history)
 
+    def _record_range_history(self, from_ts, to_ts):
+        if not from_ts or not to_ts or from_ts >= to_ts:
+            return
+        before_len = len(self.range_history)
+        self.range_history = push_range_history(self.range_history, from_ts, to_ts)
+        if len(self.range_history) != before_len:
+            save_range_history(self.range_history)
+            self.range_history_combo.blockSignals(True)
+            self.range_history_combo.clear()
+            self.range_history_combo.addItem('— 选择历史时间区间 —')
+            for item in self.range_history:
+                self.range_history_combo.addItem(item['label'], item)
+            self.range_history_combo.setEnabled(True)
+            self.range_history_combo.blockSignals(False)
+
+    def _rotate_log_if_needed(self):
+        try:
+            if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+                backup = LOG_PATH + '.1'
+                if os.path.exists(backup):
+                    os.remove(backup)
+                os.replace(LOG_PATH, backup)
+        except Exception:
+            pass
+
+    def _write_log_file(self, query, logs):
+        try:
+            self._rotate_log_if_needed()
+            with open(LOG_PATH, 'a', encoding='utf-8') as f:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                f.write('===== [{}] query={!r} range={} page={} =====\n'.format(
+                    ts, query, self.format_range_label(),
+                    self.current_page + 1
+                ))
+                for entry in logs:
+                    contents = dict(entry.contents)
+                    f.write(json.dumps(
+                        contents, ensure_ascii=False, sort_keys=True
+                    ))
+                    f.write('\n')
+                f.write('\n')
+        except Exception as e:
+            self.statusBar().showMessage(
+                '写入日志失败: {}'.format(e), 5000
+            )
+
     def on_prev(self):
+        if self.worker and self.worker.isRunning():
+            return
         if self.current_page > 0:
             self.current_page -= 1
             self._run_query()
 
     def on_next(self):
-        if (self.current_page + 1) * self.page_size < self.total_count:
-            self.current_page += 1
+        if self.worker and self.worker.isRunning():
+            return
+        self.current_page += 1
+        self._run_query()
+
+    def on_first(self):
+        if self.worker and self.worker.isRunning():
+            return
+        if self.current_page > 0:
+            self.current_page = 0
             self._run_query()
+
+    def on_last(self):
+        if self.worker and self.worker.isRunning():
+            return
+        last_page = max(0, (self.total_count - 1) // self.page_size)
+        if self.total_count > 0 and self.current_page < last_page:
+            self.current_page = last_page
+            self._run_query()
+
+    def on_page_jump(self, page_num):
+        if self.worker and self.worker.isRunning():
+            return
+        page_idx = page_num - 1
+        if page_idx == self.current_page:
+            return
+        last_page = max(0, (self.total_count - 1) // self.page_size)
+        if self.total_count > 0 and page_idx > last_page:
+            page_idx = last_page
+        self.current_page = page_idx
+        self._run_query()
 
     def on_page_size_change(self):
         self.page_size = int(self.page_size_combo.currentText())
@@ -399,32 +525,56 @@ class MainWindow(QMainWindow):
         if not rows:
             return
         row = rows[0].row()
-        item = self.table.item(row, 1)
-        if item:
-            self.detail.setPlainText(item.text())
-
-    def on_event_click(self, query):
-        self.query_combo.setCurrentText(query)
-        self.on_search()
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        json_text = item.data(Qt.UserRole)
+        if not json_text:
+            content_item = self.table.item(row, 1)
+            json_text = content_item.text() if content_item else ''
+        self.detail.setPlainText(json_text)
 
     def on_clear_history(self):
-        if not self.history:
+        if not self.history and not self.range_history:
             self.statusBar().showMessage('历史已为空', 3000)
             return
         reply = QMessageBox.question(
-            self, '清空历史', '确定要清空所有搜索历史吗？',
+            self, '清空历史', '确定要清空所有搜索历史与时间区间历史吗？',
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
         self.history = []
+        self.range_history = []
         save_history(self.history)
+        save_range_history(self.range_history)
         self.query_combo.clear()
         self.query_combo.lineEdit().setPlaceholderText(
             '输入 SLS 查询语句（例: _doRandomTeleporter 或 level:ERROR），回车搜索；'
             '下拉框显示历史搜索'
         )
-        self.statusBar().showMessage('搜索历史已清空', 3000)
+        self.range_history_combo.blockSignals(True)
+        self.range_history_combo.clear()
+        self.range_history_combo.addItem('— 选择历史时间区间 —')
+        self.range_history_combo.setEnabled(False)
+        self.range_history_combo.blockSignals(False)
+        self.statusBar().showMessage('历史已清空', 3000)
+
+    def on_range_history_activated(self, index):
+        if index <= 0:
+            return
+        item = self.range_history_combo.itemData(index)
+        if not item:
+            return
+        from_ts = int(item.get('from', 0))
+        to_ts = int(item.get('to', 0))
+        if not from_ts or not to_ts:
+            return
+        self.time_combo.setCurrentIndex(CUSTOM_RANGE_INDEX)
+        self.from_dt.setDateTime(QDateTime.fromSecsSinceEpoch(from_ts))
+        self.to_dt.setDateTime(QDateTime.fromSecsSinceEpoch(to_ts))
+        self.range_history_combo.setCurrentIndex(0)
+        self.on_apply_range()
 
     def on_table_context_menu(self, pos):
         if not self.table.selectionModel().selectedRows():
@@ -444,10 +594,13 @@ class MainWindow(QMainWindow):
         lines = []
         for idx in sorted(r.row() for r in rows):
             ts_item = self.table.item(idx, 0)
-            content_item = self.table.item(idx, 1)
+            host_item = self.table.item(idx, 1)
+            content_item = self.table.item(idx, 2)
             ts = ts_item.text() if ts_item else ''
+            host = host_item.text() if host_item else ''
             content = content_item.text() if content_item else ''
-            lines.append('{}\t{}'.format(ts, content) if ts else content)
+            parts = [ts, host, content]
+            lines.append('\t'.join(p for p in parts if p))
         QApplication.clipboard().setText('\n'.join(lines))
         self.statusBar().showMessage(
             '已复制 {} 行到剪贴板'.format(len(rows)), 3000
@@ -460,10 +613,13 @@ class MainWindow(QMainWindow):
         lines = []
         for i in range(self.table.rowCount()):
             ts_item = self.table.item(i, 0)
-            content_item = self.table.item(i, 1)
+            host_item = self.table.item(i, 1)
+            content_item = self.table.item(i, 2)
             ts = ts_item.text() if ts_item else ''
+            host = host_item.text() if host_item else ''
             content = content_item.text() if content_item else ''
-            lines.append('{}\t{}'.format(ts, content) if ts else content)
+            parts = [ts, host, content]
+            lines.append('\t'.join(p for p in parts if p))
         QApplication.clipboard().setText('\n'.join(lines))
         self.statusBar().showMessage(
             '已复制当前页 {} 行到剪贴板'.format(self.table.rowCount()), 3000
@@ -472,6 +628,7 @@ class MainWindow(QMainWindow):
     def _run_query(self):
         query = self.query_combo.currentText().strip()
         from_time, to_time = self.get_time_range()
+        self._record_range_history(from_time, to_time)
         offset = self.current_page * self.page_size
 
         self.statusBar().showMessage('查询中... [{}]'.format(self.format_range_label()))
@@ -515,14 +672,30 @@ class MainWindow(QMainWindow):
                 except Exception:
                     ts_text = str(ts_ms)
 
-            self.table.setItem(i, 0, QTableWidgetItem(ts_text))
-            self.table.setItem(i, 1, QTableWidgetItem(content_str))
+            hostname = (
+                contents.get('__tag__:__hostname__', '')
+                or contents.get('__tag__:__host__', '')
+                or getattr(log, 'source', '')
+            )
+
+            json_text = json.dumps(
+                contents, ensure_ascii=False, indent=2, sort_keys=True
+            )
+
+            ts_item = QTableWidgetItem(ts_text)
+            ts_item.setData(Qt.UserRole, json_text)
+            self.table.setItem(i, 0, ts_item)
+            self.table.setItem(i, 1, QTableWidgetItem(hostname))
+            self.table.setItem(i, 2, QTableWidgetItem(content_str))
 
         self._update_pagination_labels()
 
         self.search_btn.setEnabled(True)
+        self._write_log_file(self.query_combo.currentText().strip(), logs)
         self.statusBar().showMessage(
-            '查询完成: 当前页 {} 条，总计 {} 条'.format(len(logs), total)
+            '查询完成: 当前页 {} 条，总计 {} 条；日志已追加到 {}'.format(
+                len(logs), total, os.path.basename(LOG_PATH)
+            )
         )
 
     def on_query_error(self, msg):
@@ -533,16 +706,28 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, '查询失败', msg)
 
     def _update_pagination_labels(self):
-        total_pages = max(1, (self.total_count + self.page_size - 1) // self.page_size)
         if self.total_count == 0:
             total_pages = 1
+        else:
+            total_pages = max(1, (self.total_count + self.page_size - 1) // self.page_size)
         self.page_label.setText(
             '第 {} / {} 页'.format(self.current_page + 1, total_pages)
         )
         self.total_label.setText('共 {} 条'.format(self.total_count))
-        self.prev_btn.setEnabled(self.current_page > 0)
-        self.next_btn.setEnabled(
-            (self.current_page + 1) * self.page_size < self.total_count
+        self.total_pages_label.setText('/ {}'.format(total_pages))
+
+        self.page_spin.blockSignals(True)
+        self.page_spin.setMaximum(max(1, total_pages))
+        self.page_spin.setValue(self.current_page + 1)
+        self.page_spin.blockSignals(False)
+
+        has_prev = self.current_page > 0
+        has_more = (self.current_page + 1) * self.page_size < self.total_count
+        self.first_btn.setEnabled(has_prev)
+        self.prev_btn.setEnabled(has_prev)
+        self.next_btn.setEnabled(True)
+        self.last_btn.setEnabled(
+            has_more and self.total_count > 0
         )
 
 

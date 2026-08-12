@@ -2,6 +2,7 @@ import sys
 import json
 import os
 import time
+import sqlite3
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -17,9 +18,8 @@ from aliyun.log import LogClient, GetLogsRequest
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HISTORY_PATH = os.path.join(HERE, '.search_history.json')
+HISTORY_DB_PATH = os.path.join(HERE, 'sls_viewer_history.db')
 HISTORY_MAX = 50
-RANGE_HISTORY_PATH = os.path.join(HERE, '.range_history.json')
 RANGE_HISTORY_MAX = 20
 LOG_PATH = os.path.join(HERE, 'sls_viewer.log')
 LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -34,23 +34,69 @@ TIME_PRESETS = [
 CUSTOM_RANGE_INDEX = len(TIME_PRESETS)
 
 
+def _get_history_conn():
+    global _history_conn
+    if _history_conn is None:
+        _history_conn = sqlite3.connect(HISTORY_DB_PATH, check_same_thread=False)
+        _history_conn.execute(
+            "CREATE TABLE IF NOT EXISTS search_history ("
+            " query TEXT PRIMARY KEY,"
+            " updated_at REAL NOT NULL)"
+        )
+        _history_conn.execute(
+            "CREATE TABLE IF NOT EXISTS range_history ("
+            " from_ts INTEGER NOT NULL,"
+            " to_ts INTEGER NOT NULL,"
+            " label TEXT NOT NULL,"
+            " updated_at REAL NOT NULL,"
+            " PRIMARY KEY(from_ts, to_ts))"
+        )
+        _history_conn.commit()
+    return _history_conn
+
+
+_history_conn = None
+
+
 def load_history():
-    if not os.path.exists(HISTORY_PATH):
-        return []
     try:
-        with open(HISTORY_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return [str(x) for x in data] if isinstance(data, list) else []
-    except Exception:
+        conn = _get_history_conn()
+        rows = conn.execute(
+            'SELECT query FROM search_history ORDER BY updated_at DESC LIMIT ?',
+            (HISTORY_MAX,)
+        ).fetchall()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print('加载搜索历史失败: {}'.format(e))
         return []
 
 
-def save_history(history):
+def add_history(query):
+    if not query:
+        return
     try:
-        with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
-            json.dump(history[:HISTORY_MAX], f, ensure_ascii=False, indent=2)
+        conn = _get_history_conn()
+        conn.execute(
+            'INSERT OR REPLACE INTO search_history(query, updated_at) VALUES (?, ?)',
+            (query, time.time())
+        )
+        conn.execute(
+            'DELETE FROM search_history WHERE query NOT IN '
+            '(SELECT query FROM search_history ORDER BY updated_at DESC LIMIT ?)',
+            (HISTORY_MAX,)
+        )
+        conn.commit()
     except Exception as e:
         print('保存搜索历史失败: {}'.format(e))
+
+
+def clear_search_history():
+    try:
+        conn = _get_history_conn()
+        conn.execute('DELETE FROM search_history')
+        conn.commit()
+    except Exception as e:
+        print('清空搜索历史失败: {}'.format(e))
 
 
 def push_history(history, query):
@@ -63,35 +109,54 @@ def push_history(history, query):
 
 
 def load_range_history():
-    if not os.path.exists(RANGE_HISTORY_PATH):
-        return []
     try:
-        with open(RANGE_HISTORY_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if not isinstance(data, list):
-                return []
-            result = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                f_ts = int(item.get('from', 0))
-                t_ts = int(item.get('to', 0))
-                if f_ts and t_ts and f_ts < t_ts:
-                    label = item.get('label') or '{:%Y-%m-%d %H:%M:%S} ~ {:%Y-%m-%d %H:%M:%S}'.format(
-                        datetime.fromtimestamp(f_ts), datetime.fromtimestamp(t_ts)
-                    )
-                    result.append({'from': f_ts, 'to': t_ts, 'label': label})
-            return result[:RANGE_HISTORY_MAX]
-    except Exception:
+        conn = _get_history_conn()
+        rows = conn.execute(
+            'SELECT from_ts, to_ts, label FROM range_history '
+            'ORDER BY updated_at DESC LIMIT ?',
+            (RANGE_HISTORY_MAX,)
+        ).fetchall()
+        result = []
+        for f_ts, t_ts, label in rows:
+            if f_ts and t_ts and f_ts < t_ts:
+                result.append({'from': f_ts, 'to': t_ts, 'label': label})
+        return result
+    except Exception as e:
+        print('加载时间区间历史失败: {}'.format(e))
         return []
 
 
-def save_range_history(history):
+def add_range_history(from_ts, to_ts):
+    if not from_ts or not to_ts or from_ts >= to_ts:
+        return
+    label = '{:%Y-%m-%d %H:%M:%S} ~ {:%Y-%m-%d %H:%M:%S}'.format(
+        datetime.fromtimestamp(from_ts), datetime.fromtimestamp(to_ts)
+    )
     try:
-        with open(RANGE_HISTORY_PATH, 'w', encoding='utf-8') as f:
-            json.dump(history[:RANGE_HISTORY_MAX], f, ensure_ascii=False, indent=2)
+        conn = _get_history_conn()
+        conn.execute(
+            'INSERT OR REPLACE INTO range_history'
+            '(from_ts, to_ts, label, updated_at) VALUES (?, ?, ?, ?)',
+            (from_ts, to_ts, label, time.time())
+        )
+        conn.execute(
+            'DELETE FROM range_history WHERE (from_ts, to_ts) NOT IN '
+            '(SELECT from_ts, to_ts FROM range_history '
+            'ORDER BY updated_at DESC LIMIT ?)',
+            (RANGE_HISTORY_MAX,)
+        )
+        conn.commit()
     except Exception as e:
         print('保存时间区间历史失败: {}'.format(e))
+
+
+def clear_range_history():
+    try:
+        conn = _get_history_conn()
+        conn.execute('DELETE FROM range_history')
+        conn.commit()
+    except Exception as e:
+        print('清空时间区间历史失败: {}'.format(e))
 
 
 def push_range_history(history, from_ts, to_ts):
@@ -103,6 +168,41 @@ def push_range_history(history, from_ts, to_ts):
     history = [h for h in history if not (h['from'] == from_ts and h['to'] == to_ts)]
     history.insert(0, {'from': from_ts, 'to': to_ts, 'label': label})
     return history[:RANGE_HISTORY_MAX]
+
+
+def _migrate_legacy_json():
+    legacy_files = [
+        ('.search_history.json', 'query'),
+        ('.range_history.json', 'range'),
+    ]
+    for filename, kind in legacy_files:
+        path = os.path.join(HERE, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list) and data:
+                if kind == 'query':
+                    for item in data:
+                        if isinstance(item, str) and item.strip():
+                            add_history(item)
+                else:
+                    for item in data:
+                        if isinstance(item, dict):
+                            f_ts = int(item.get('from', 0))
+                            t_ts = int(item.get('to', 0))
+                            if f_ts and t_ts and f_ts < t_ts:
+                                add_range_history(f_ts, t_ts)
+        except Exception as e:
+            print('迁移 {} 失败: {}'.format(filename, e))
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
+_migrate_legacy_json()
 
 
 def parse_logstores(raw):
@@ -461,25 +561,25 @@ class MainWindow(QMainWindow):
             return
         if query in self.history:
             return
+        add_history(query)
         self.history = push_history(self.history, query)
         self.query_combo.insertItem(0, query)
         self.query_combo.setCurrentIndex(0)
-        save_history(self.history)
 
     def _record_range_history(self, from_ts, to_ts):
         if not from_ts or not to_ts or from_ts >= to_ts:
             return
-        before_len = len(self.range_history)
-        self.range_history = push_range_history(self.range_history, from_ts, to_ts)
-        if len(self.range_history) != before_len:
-            save_range_history(self.range_history)
-            self.range_history_combo.blockSignals(True)
-            self.range_history_combo.clear()
-            self.range_history_combo.addItem('— 选择历史时间区间 —')
-            for item in self.range_history:
-                self.range_history_combo.addItem(item['label'], item)
-            self.range_history_combo.setEnabled(True)
-            self.range_history_combo.blockSignals(False)
+        if any(h['from'] == from_ts and h['to'] == to_ts for h in self.range_history):
+            return
+        add_range_history(from_ts, to_ts)
+        self.range_history = load_range_history()
+        self.range_history_combo.blockSignals(True)
+        self.range_history_combo.clear()
+        self.range_history_combo.addItem('— 选择历史时间区间 —')
+        for item in self.range_history:
+            self.range_history_combo.addItem(item['label'], item)
+        self.range_history_combo.setEnabled(True)
+        self.range_history_combo.blockSignals(False)
 
     def _rotate_log_if_needed(self):
         try:
@@ -589,8 +689,8 @@ class MainWindow(QMainWindow):
             return
         self.history = []
         self.range_history = []
-        save_history(self.history)
-        save_range_history(self.range_history)
+        clear_search_history()
+        clear_range_history()
         self.query_combo.clear()
         self.query_combo.lineEdit().setPlaceholderText(
             '输入 SLS 查询语句（例: _doRandomTeleporter 或 level:ERROR），回车搜索；'
@@ -679,8 +779,6 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
-        self.table.setRowCount(0)
-        self.detail.clear()
 
         self.worker = QueryWorker(
             self.client,
@@ -701,8 +799,6 @@ class MainWindow(QMainWindow):
         self._pending_page = None
 
         if pending is not None and len(logs) == 0:
-            self.table.setRowCount(0)
-            self.detail.clear()
             self._update_pagination_labels()
             self.search_btn.setEnabled(True)
             self.statusBar().showMessage(

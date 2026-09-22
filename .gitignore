@@ -4,3 +4,6 @@
 *.navmesh
 *.csv
 .jscpd-temp
+*.log
+*.1
+*.db

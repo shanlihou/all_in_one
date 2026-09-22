@@ -905,8 +905,21 @@ def load_config():
 
 def main():
     config = load_config()
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    base_font = QFont(app.font())
+    base_pt = base_font.pointSize()
+    if base_pt <= 0:
+        base_pt = 10
+        base_font.setPointSize(base_pt)
+    screen = app.primaryScreen()
+    if screen is not None:
+        dpi = screen.logicalDotsPerInch()
+        if dpi > 96:
+            base_font.setPointSize(max(9, int(round(base_pt * dpi / 96.0))))
+    app.setFont(base_font)
     win = MainWindow(config)
     win.show()
     sys.exit(app.exec_())
